@@ -1,92 +1,102 @@
 import asyncio
-import socket
 
-async def handle_client(client, timeout_seconds, chunk_size):
+async def handle_client(reader, writer, timeout_seconds, chunk_size):
     try:
         while True:
-            weight = input("Enter weight: ")
-
+            # Read weight input from the user
+            input_weight = await asyncio.get_event_loop().run_in_executor(None, input, "Enter weight: ")
             try:
-                weight = float(weight)
+                weight = float(input_weight)
             except ValueError:
-                print("Input error")
+                print("Invalid weight input.")
                 continue
 
-            code = "<No_Code>"  # Emulate the absence of a product code
+            code = "<No_Code>"  # Simulate absence of product code
             sign = "+"
-            weight_string = f"{weight:07.3f}"
-            stability = " " 
+            weight_string = "{:07.3f}".format(weight)  # Format weight as "000.000"
+            stability = " "  # Stable weight
 
-            message = f"{code}{sign}{weight_string} kg {stability}\r\x1E"
+            # Form the message according to the protocol
+            message = f"{code}{sign}{weight_string} kg {stability}\x0d\x1E"
 
-            await send_data(client, message, chunk_size)
+            await send_data(writer, message, chunk_size)
+            await clear_stream_buffer(reader)
 
-            await clear_stream_buffer(client)
-            # Confirmation waiting
-            confirmation_received = await wait_for_confirmation_with_timeout(client, timeout_seconds)
+            # Wait for confirmation
+            confirmation_received = await wait_for_confirmation_with_timeout(reader, timeout_seconds)
             if confirmation_received:
-                print("Confirmation received")
+                print("Confirmation received.")
             else:
-                print("Error: Confirmation not received")
+                print("Error: confirmation not received.")
     except Exception as ex:
-        print("Error: ", ex)
+        print(f"Error working with client: {ex}")
     finally:
-        client.close()
-        print("Connection closed")
+        writer.close()
+        await writer.wait_closed()
+        print("Client disconnected.")
 
-async def send_data(client, message, chunk_size):
+async def send_data(writer, message, chunk_size):
     data = message.encode('ascii')
     bytes_sent = 0
     while bytes_sent < len(data):
         bytes_to_send = min(chunk_size, len(data) - bytes_sent)
-        client.sendall(data[bytes_sent:bytes_sent + bytes_to_send])
+        writer.write(data[bytes_sent:bytes_sent + bytes_to_send])
+        await writer.drain()
         bytes_sent += bytes_to_send
         await asyncio.sleep(0.05)
     print("Data sent to client")
 
-async def wait_for_confirmation_with_timeout(client, timeout_seconds):
-    buffer = bytearray(1)
+async def wait_for_confirmation_with_timeout(reader, timeout_seconds):
     try:
         while True:
-            client.settimeout(timeout_seconds)
             try:
-                bytes_read = client.recv_into(buffer)
-                if bytes_read > 0:
-                    received_char = chr(buffer[0])
-                    print(f"Received char: {received_char}")
-                    
-
+                data = await asyncio.wait_for(reader.read(1), timeout=timeout_seconds)
+                if data:
+                    received_char = data.decode('ascii')
+                    print(f"Received character: {received_char}")
                     if received_char == '!':
                         return True  # Confirmation received
-            except socket.timeout:
-                return False  # Timeout
-            await asyncio.sleep(0.1)  # Wait before the next cycle
+                else:
+                    # No data received, connection closed
+                    return False
+            except asyncio.TimeoutError:
+                # Timeout occurred
+                return False
+            await asyncio.sleep(0.1)
+    except Exception as ex:
+        # An error occurred
+        print(f"Error: {ex}")
+        return False
+
+async def clear_stream_buffer(reader):
+    try:
+        while True:
+            try:
+                data = await asyncio.wait_for(reader.read(1024), timeout=0.1)
+                if not data:
+                    break
+                # Ignore read data
+            except asyncio.TimeoutError:
+                break
     except Exception:
         pass
 
-    return False  # Timeout
-
-async def clear_stream_buffer(client):
-    buffer = bytearray(1024)
-    while True:
-        client.settimeout(0.1)
-        try:
-            client.recv_into(buffer)
-        except socket.timeout:
-            break
-
 async def main():
-    port = 10001  # Listening port
-    timeout_seconds = 5  # Timeout for waiting for confirmation
-    chunk_size = 1024  # Data chunk size for sending
+    port = 10001  # Server port
+    timeout_seconds = 5  # Timeout for confirmation
+    chunk_size = 1024  # Size of data chunk to send
 
     server = await asyncio.start_server(
-        lambda r, w: handle_client(w, timeout_seconds, chunk_size),
-        '0.0.0.0', port
-    )
+        lambda r, w: handle_client(r, w, timeout_seconds, chunk_size),
+        '0.0.0.0', port)
+
+    print(f"Server started on port {port}. Waiting for client connection...")
 
     async with server:
-        print(f"Mera MW started on port {port}. Waiting for client connection...")
         await server.serve_forever()
 
-asyncio.run(main())
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except Exception as ex:
+        print(f"Server error: {ex}")
